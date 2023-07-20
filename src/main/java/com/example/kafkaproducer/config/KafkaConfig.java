@@ -18,8 +18,8 @@ import org.springframework.kafka.core.*;
 import java.util.HashMap;
 import java.util.Map;
 
-@EnableKafka
-//@EnableKafkaStreams
+//@EnableKafka
+@EnableKafkaStreams
 @Configuration
 public class KafkaConfig {
 
