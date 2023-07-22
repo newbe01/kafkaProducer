@@ -15,6 +15,10 @@ import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.TreeMap;
+
 @Service
 public class AdEvaluationService {
 
@@ -41,24 +45,24 @@ public class AdEvaluationService {
         Serde<WatchingAdLog> watchingSerde = Serdes.serdeFrom(watchingSerializer, watchingDeserializer);
 
         KTable<String, WatchingAdLog> adTable = sb.stream("AdLog", Consumed.with(Serdes.String(), watchingSerde))
-                .toTable(Materialized.<String, WatchingAdLog, KeyValueStore<Bytes, byte[] >>as("adStore")
+                .selectKey((k, v) -> v.getUserId() + "_" + v.getProductId())
+                .toTable(Materialized.<String, WatchingAdLog, KeyValueStore<Bytes, byte[]>>as("adStore")
                         .withKeySerde(Serdes.String())
                         .withValueSerde(watchingSerde)
                 );
 
         KStream<String, PurchaseLog> purchaseLogKStream =
-                sb.stream("OrderLog", Consumed.with(Serdes.String(), purchaseSerde))
-                        .filter((key, value) -> value.getPrice() > 1000000);
+                sb.stream("OrderLog", Consumed.with(Serdes.String(), purchaseSerde));
 
         purchaseLogKStream.foreach((k,v) -> {
-            for (String prodId : v.getProductId()) {
+            for (Map<String, String> prodInfo : v.getProductInfo()) {
 
-                if (v.getPrice() < 1000000) {
+                if (Integer.valueOf(prodInfo.get("price")) < 1000000) {
                     PurchaseLogOneProduct tmpVo = new PurchaseLogOneProduct();
                     tmpVo.setUserId(v.getUserId());
-                    tmpVo.setProductId(prodId);
+                    tmpVo.setProductId(prodInfo.get("productId"));
                     tmpVo.setOrderId(v.getOrderId());
-                    tmpVo.setPrice(v.getPrice());
+                    tmpVo.setPrice(prodInfo.get("price"));
                     tmpVo.setPurchasedDt(v.getPurchasedDt());
 
                     producer.sendJoinedMsg("oneProduct", tmpVo);
@@ -66,19 +70,30 @@ public class AdEvaluationService {
             }
         });
 
-        KStream<String, PurchaseLogOneProduct> oneStream
-                = sb.stream("oneProduct", Consumed.with(Serdes.String(), purchaseOneSerde));
+        KTable<String, PurchaseLogOneProduct> oneTable
+                = sb.stream("oneProduct", Consumed.with(Serdes.String(), purchaseOneSerde))
+                .selectKey((k, v) -> v.getUserId() + "_" + v.getProductId())
+                .toTable(Materialized.<String, PurchaseLogOneProduct, KeyValueStore<Bytes, byte[]>>as("purchaseLogStore")
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(purchaseOneSerde));
 
 
-        ValueJoiner<WatchingAdLog, PurchaseLog, EffectOrNot> tableStreamJoiner = (leftValue, rightValue) -> {
+        ValueJoiner<WatchingAdLog, PurchaseLogOneProduct, EffectOrNot> tableStreamJoiner = (leftValue, rightValue) -> {
             EffectOrNot returnValue = new EffectOrNot();
 
-                returnValue.setUserId(leftValue.getUserId());
+                returnValue.setUserId(rightValue.getUserId());
                 returnValue.setAdId(leftValue.getAdId());
-                returnValue.setEffectiveness("Y");
+                returnValue.setOrderId(rightValue.getOrderId());
+            Map<String, String> tempProdInfo = new HashMap<>();
+            tempProdInfo.put("productId", rightValue.getProductId());
+            tempProdInfo.put("price", rightValue.getPrice());
+            returnValue.setProductInfo(tempProdInfo);
 
             return returnValue;
         };
+
+        adTable.join(oneTable, tableStreamJoiner)
+                .toStream().to("AdEvaluationComplete", Produced.with(Serdes.String(), effectSerde));
 
     }
 
